@@ -4,8 +4,8 @@ using LinearAlgebra
 # target distirbution
 # Gaussina target N(0, Id)
 
-d
-target = McDiagMvNormal(zeros(2), ones(2))
+dim = 10
+target = MvNormal(10.0*ones(dim), ones(dim))
 
 # transition kernel
 
