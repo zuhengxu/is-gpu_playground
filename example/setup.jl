@@ -25,7 +25,9 @@ function constructor(;dim = 2, device = "cpu", broadcast= true)
     return logp, ∇logp, logq, ∇logq
 end
 
-
+function rng_device(device)
+    return device == "cpu" ? Random.default_rng() : CUDA.default_rng()
+end
 
 
 # WARN: Distributions.jl doesn't play with CUDA.jl nicely, particularly the rand() function

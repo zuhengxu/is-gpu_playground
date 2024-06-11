@@ -9,10 +9,6 @@ include("../is.jl")
 include("utils.jl")
 include("setup.jl")
 
-function rng_device(device)
-    return device == "cpu" ? Random.default_rng() : CUDA.default_rng()
-end
-
 # benchmark importance sampling on cpu and gpu
 function is_timing(device, dim, n; n_run=10)
     f = x -> x # NOTE: we choose the test function corresponding to the mean estimate
