@@ -1,1 +1,1 @@
-# smc-ais-gpu-playground
+# Importance sampling on GPU
