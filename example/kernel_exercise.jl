@@ -3,12 +3,11 @@ using Random
 using LinearAlgebra
 using CUDA
 using LogExpFunctions: logsumexp
+using BenchmarkTools
 
 cd("example") # change working directory to benchmark/ if needed
 include("../is.jl")
 include("utils.jl")
-include("setup.jl")
-
 
 
 # importance sampling can be naturally parallelized over particles, 
@@ -18,62 +17,106 @@ include("setup.jl")
 
 # cpu threads = 10
 
-# benchmark importance sampling on cpu and gpu
-function is_parallel_timing(device, dim, n; n_run=10, nthreads = 256)
-    f = x -> x # NOTE: we choose the test function corresponding to the mean estimate
-    logp, _, logq, _ = constructor(; dim=dim, device=device, broadcast=false)
-    xs = device=="cpu" ? randn(Float32, dim, n) : cu(randn(Float32, dim, n))
-
-    # just execute the function to nrun times to track the time
-    if device == "cpu"
-        args = (logq, logp, xs, f)
-        time_log = noob_timing(is_parallel_cpu, args...; n_run=n_run)
-    elseif device == "gpu_manual"
-        args = (logq, logp, xs, f, nthreads)
-        # ERROR: logp and logq are high level functions, cannot be invoked in kernel
-        time_log = noob_timing(is_parallel_cuda_manual, args...; n_run=n_run)
-    else
-        args = (logq, logp, xs, f)
-        # ERROR: logp and logq are high level functions, cannot be invoked in kernel
-        time_log = noob_timing(is_parallel_cuda_auto, args...; n_run=n_run)
+# let's work on 1d cases
+# target p ∼ N(10, 1), proposal q ∼ N(0, 1)
+logpdf_ratio_1d(x) = 50 - 10x
+"""
+    logws_cpu_parallel!(xs, logws)
+parallelized log weights calculation for each particle on CPU
+"""
+function logws_cpu_parallel!(xs::AbstractVector{T}, logws) where T
+    N = length(xs)
+    Threads.@threads for i in 1:N
+        @inbounds logws[i] = logpdf_ratio_1d(xs[i])
     end
-
-    return time_log
 end
 
-dim = 100
-n_particle = 10000
-ts_cpu = is_parallel_timing("cpu", dim, n_particle; n_run=10)
-ts_gpu_manual = is_parallel_timing("gpu_manual", dim, n_particle; n_run=10, nthreads = 256)
-ts_gpu_auto = is_parallel_timing("gpu_auto", dim, n_particle; n_run=10)
+function is_cpu_prallel(N)
+    f = x -> x^2 # test function
+
+    logws = fill(0f0, N) 
+    xs = randn(Float32, N)
+    
+    logws_cpu_parallel!(xs, logws)
+    
+    log_weights_normalization!(logws)    
+    logws .= exp.(logws) # in place exponentiation
+    xs .= f.(xs)
+    return logws' * xs
+end  
 
 
-# function _is_kernel!(logws_gpu, logp, logq, xs_gpu, N)
-#     index = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-#     stride = gridDim().x * blockDim().x
-#     for i = index:stride:N
-#         @inbounds logws_gpu[i] = logp(@view(xs_gpu[:, i])) - logq(@view(xs_gpu[:, i]))
-#     end
-#     return 
-# end
-#
-# # Example of how to invoke this kernel function:
-# function run_kernel(logp, logq, n)
-#     # assuming `logp` and `logq` are suitable gpu functions and `xs` is already on gpu
-#     logws_gpu = CUDA.zeros(Float32, n)  # pre-allocate gpu memory for results
-#     xs_gpu = cu(randn(Float32, dim, n))  # ensure data is on gpu
-#
-#     # launching the kernel with enough threads:
-#     # it's important to configure blocks and threads according to gpu architecture.
-#     # for simplicity, launching one thread per data point, but in practice,
-#     # you may need to consider maximum threads per block and grid size.
-#     numblocks = ceil(Int, n/256)
-#     xs_gpu = cu(randn(Float32, dim))  # ensure data is on gpu
-#     CUDA.@sync begin
-#         @cuda threads=256 blocks=numblocks dynamic = true _is_kernel!(logws_gpu, logp, logq, xs_gpu, n)
-#     end
-#
-#     # optionally, copy results back to cpu memory if needed elsewhere
-#     logws = CUDA.collect(logws_gpu)
-#     return logws
-# end
+"""
+    _logws_cuda_parallel!(logws, xs, N)
+cuda kernel for parallel log-weights calculation for each particle on GPU
+"""
+function _is_cuda_kernel!(logws, xs, N)
+    index = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    stride = gridDim().x * blockDim().x
+
+    # this for loop will later be parallelized over the grid of blocks and threads
+    for i = index:stride:N
+        @inbounds logws[i] = logpdf_ratio_1d(xs[i])
+    end
+    return nothing
+end
+
+function is_cuda_parallel(N; nthreads = 256)
+    f = x -> x^2 # test function
+
+    logws = CUDA.zeros(Float32, N)  # pre-allocate gpu memory for results
+    xs = randn(CUDA.default_rng(), N)  # generate from proposal N(0, 1) on gpu
+
+    # launching the kernel with enough threads:
+    # it's important to configure blocks and threads according to gpu architecture.
+    # for simplicity, launching one thread per data point, but in practice,
+    # you may need to consider maximum threads per block and grid size.
+    numblocks = ceil(Int, N/nthreads) # number of blocks based on the thread length
+    CUDA.@sync begin
+        # we manually configure the number of threads and blocks
+        @cuda threads=nthreads blocks=numblocks _is_cuda_kernel!(logws, xs, N)
+    end
+
+    log_weights_normalization!(logws)    
+    logws .= exp.(logws) # in place exponentiation
+    xs .= f.(xs) # in place test function evaluation
+    return logws' * xs
+end
+
+function is_cuda_parallel_auto(N)
+    f = x -> x^2 # test function
+
+    logws = CUDA.zeros(Float32, N)  # pre-allocate gpu memory for results
+    xs = randn(CUDA.default_rng(), N)  # generate from proposal N(0, 1) on gpu
+
+    # using kernel configuration to automatically determine the number of threads and blocks
+    kernel = @cuda launch=false _is_cuda_kernel!(logws, xs, N)    
+    config = launch_configuration(kernel.fun)
+    threads = min(N, config.threads)
+    blocks = cld(N, threads)
+
+    # cuda kernel of parallelized weight calculation
+    CUDA.@sync begin
+        kernel(logws, xs, N; threads, blocks)
+    end
+    log_weights_normalization!(logws)    
+    logws .= exp.(logws) # in place exponentiation
+    xs .= f.(xs)
+    return logws' * xs
+end
+
+
+N = 10^8
+@btime is_cpu_prallel(N)
+@btime is_cuda_parallel(N; nthreads = 256)
+@btime is_cuda_parallel_auto(N)
+
+
+
+
+
+
+
+
+
+

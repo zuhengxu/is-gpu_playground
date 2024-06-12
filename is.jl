@@ -16,6 +16,11 @@ function is_weights(logq, logp, xs)
     logws = is_log_weights(logq, logp, xs)
     return exp.(logws)
 end
+
+"""
+    log_weights_normalization!(logws)
+in place normalization of log weights
+"""
 function log_weights_normalization!(logws)
     logws .-= logsumexp(logws)
 end
@@ -36,7 +41,7 @@ end
 
 
 
-
+# WARNING: bug in the following code
 """
     is_parallel_cpu(logq, logp, xs, f)
 explicitly parallelize the weight calculation for each particle on CPU
