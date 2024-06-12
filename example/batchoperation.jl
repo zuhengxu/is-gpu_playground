@@ -67,7 +67,7 @@ ts_particle_cpu, ts_particle_gpu = is_particle_scaling(d, Ns; n_run=10)
 # use unicodeplots backend if we want to plot in terminal
 # unicodeplots()
 
-if !isfile("figure")
+if !isdir("figure")
     mkdir("figure")
 end
 
