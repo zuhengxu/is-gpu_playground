@@ -3,6 +3,8 @@ using Random
 using LinearAlgebra
 using CUDA
 
+CUDA.seed!(123)
+
 
 # Gaussian target N(μ, Id) and proposal N(0, Id)
 const log2π = Float32(log(2π))
